@@ -6,7 +6,7 @@ import type { Job, RunStats, ScoredJob } from '../models/job.js';
 import { CompaniesStore, SeenJobsStore } from '../db/store.js';
 import { ATS_COLLECTORS, getCollector } from '../sources/ats/base.js';
 import { filterUnseen, markSeen, getJobKey } from '../dedup/deduplicator.js';
-import { scoreJobs, filterByThreshold } from '../scoring/gemini.js';
+import { scoreJobs, filterByThreshold } from '../scoring/llm.js';
 import { notifyJobMatches, notifySummary } from '../notify/telegram.js';
 import { promoteHighScoringCompanies } from '../watchlist/promoter.js';
 import { TITLE_INCLUDE_KEYWORDS, TITLE_EXCLUDE_KEYWORDS, SUPPORTED_ATS, CONFIG } from '../config/constants.js';

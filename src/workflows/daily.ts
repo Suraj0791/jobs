@@ -7,7 +7,7 @@ import { CompaniesStore, SeenJobsStore } from '../db/store.js';
 import { downloadLatestChanges, downloadCompanies } from '../sources/openjobdata/downloader.js';
 import { filterDailyChanges, lookupCompanies, getParquetRowCount } from '../sources/openjobdata/filter.js';
 import { filterUnseen, markSeen, getJobKey } from '../dedup/deduplicator.js';
-import { scoreJobs, filterByThreshold } from '../scoring/gemini.js';
+import { scoreJobs, filterByThreshold } from '../scoring/llm.js';
 import { notifyJobMatches, notifySummary } from '../notify/telegram.js';
 import { promoteHighScoringCompanies } from '../watchlist/promoter.js';
 import { closeDuckDB } from '../db/duckdb.js';

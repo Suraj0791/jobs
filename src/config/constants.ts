@@ -90,23 +90,55 @@ export const CONFIG = {
     return parseFloat(process.env.SCORE_THRESHOLD || '7');
   },
 
-  /** Gemini model name */
-  get geminiModel(): string {
-    return process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+  /** Get available LLM providers from environment variables (Automatic Fallback list) */
+  get llmProviders() {
+    const providers = [];
+
+    // 1. Groq (Fastest, 14k free requests/day)
+    if (process.env.GROQ_API_KEY) {
+      providers.push({
+        name: 'Groq',
+        baseUrl: 'https://api.groq.com/openai/v1',
+        apiKey: process.env.GROQ_API_KEY,
+        model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+        delayMs: 2000, // Groq is fast, 30 RPM
+      });
+    }
+
+    // 2. OpenRouter (DeepSeek / Llama 3)
+    if (process.env.OPENROUTER_API_KEY) {
+      providers.push({
+        name: 'OpenRouter',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        apiKey: process.env.OPENROUTER_API_KEY,
+        model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+        delayMs: 3000,
+      });
+    }
+
+    // 3. Google Gemini (via OpenAI compatibility)
+    if (process.env.GEMINI_API_KEY) {
+      providers.push({
+        name: 'Gemini',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+        apiKey: process.env.GEMINI_API_KEY,
+        model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+        delayMs: 6000, // 15 RPM max
+      });
+    }
+
+    return providers;
   },
 
-  /** Max Gemini API calls per workflow run (budget guard) */
-  get maxGeminiCallsPerRun(): number {
-    return parseInt(process.env.MAX_GEMINI_CALLS_PER_RUN || '200', 10);
+  /** Max LLM API calls per workflow run (budget guard) */
+  get maxLlmCallsPerRun(): number {
+    return parseInt(process.env.MAX_LLM_CALLS_PER_RUN || '200', 10);
   },
 
   /** Dry run mode — no Telegram, no DB writes */
   get dryRun(): boolean {
     return process.env.DRY_RUN === 'true';
   },
-
-  /** Delay between Gemini API calls in ms (rate limiting) */
-  geminiDelayMs: 6000,
 
   /** Delay between ATS API calls in ms (politeness) */
   atsDelayMs: 150,

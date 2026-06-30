@@ -17,8 +17,8 @@
   "license": "MIT",
   "dependencies": {
     "@duckdb/node-api": "latest",
-    "@google/genai": "latest",
-    "better-sqlite3": "latest"
+    "better-sqlite3": "latest",
+    "openai": "^4.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

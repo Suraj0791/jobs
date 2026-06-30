@@ -8,31 +8,12 @@ import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { WatchlistEntry } from '../models/job.js';
 import { CONFIG } from '../config/constants.js';
-import { SCHEMA_SQL } from './schema.js';
+import { COMPANIES_SCHEMA, SEEN_JOBS_SCHEMA } from './schema.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-/**
- * Gets SQL statements for the specified database type.
- */
-function getSchemaStatements(dbType: 'companies' | 'seen_jobs'): string[] {
-  // Split on semicolons, trim whitespace, filter empty
-  const allStatements = SCHEMA_SQL
-    .split(';')
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !s.startsWith('--'));
 
-  if (dbType === 'companies') {
-    // Companies DB: companies table + watchlist table + their indexes
-    return allStatements.filter(s =>
-      s.includes('companies') || s.includes('watchlist')
-    );
-  } else {
-    // Seen jobs DB: seen_jobs table + its indexes
-    return allStatements.filter(s => s.includes('seen_jobs'));
-  }
-}
 
 /**
  * Manages the companies.db database (company registry + watchlist).
@@ -50,13 +31,7 @@ export class CompaniesStore {
   }
 
   private init(): void {
-    const statements = getSchemaStatements('companies');
-    const transaction = this.db.transaction(() => {
-      for (const stmt of statements) {
-        this.db.exec(stmt);
-      }
-    });
-    transaction();
+    this.db.exec(COMPANIES_SCHEMA);
   }
 
   /** Upsert a single company record */
@@ -247,13 +222,7 @@ export class SeenJobsStore {
   }
 
   private init(): void {
-    const statements = getSchemaStatements('seen_jobs');
-    const transaction = this.db.transaction(() => {
-      for (const stmt of statements) {
-        this.db.exec(stmt);
-      }
-    });
-    transaction();
+    this.db.exec(SEEN_JOBS_SCHEMA);
   }
 
   /** Check if a job has already been seen/processed */

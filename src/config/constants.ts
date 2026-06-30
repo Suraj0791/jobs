@@ -115,10 +115,10 @@ export const CONFIG = {
   maxWatchlistSize: 2000,
 
   /** OpenJobData HuggingFace bucket base URL */
-  hfBucketBase: 'https://huggingface.co/api/repos/Invicto69/Jobs-Dataset-bucket/tree/main/data',
+  hfBucketBase: 'https://huggingface.co/api/buckets/Invicto69/Jobs-Dataset-bucket/tree/data',
 
   /** Direct file download base */
-  hfDownloadBase: 'https://huggingface.co/buckets/Invicto69/Jobs-Dataset-bucket/resolve/main/data',
+  hfDownloadBase: 'https://huggingface.co/buckets/Invicto69/Jobs-Dataset-bucket/resolve/data',
 
   /** Temp directory for downloaded parquet files */
   tmpDir: 'tmp',

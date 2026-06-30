@@ -100,8 +100,8 @@ export const CONFIG = {
         name: 'Groq',
         baseUrl: 'https://api.groq.com/openai/v1',
         apiKey: process.env.GROQ_API_KEY,
-        model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', // 8B has a 30,000 TPM limit (5x higher)
-        delayMs: 4000, // 4s delay to stay under TPM limits
+        model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+        delayMs: 20000, // 20s delay ensures we never hit the 6,000 TPM limit
       });
     }
 

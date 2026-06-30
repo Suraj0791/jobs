@@ -53,7 +53,7 @@ CRITICAL INSTRUCTION ON TECH STACK: For Entry-Level and Internship Software Engi
 - Score 9-10: Perfect match — right level, right location, right company type. Tech stack is either a perfect match, OR it's a general entry-level/intern SDE role where language doesn't strictly matter.
 - Score 7-8: Good match — mostly aligned, maybe slightly above level, or specific stack requirements that might be a slight hurdle but still worth applying.
 - Score 5-6: Partial match — right field but clearly requires senior experience, or strictly requires a deeply specialized skill (e.g., specific machine learning framework) the candidate lacks.
-- Score 0-4: Poor match — wrong field (e.g., HR, Sales), far too senior, wrong location, or completely unrelated.
+- Score 0-4: Poor match — completely unrelated field (e.g., HR, Sales, Basketball, Editing, Production), far too senior, or wrong location. CRITICAL: If the job is NOT a software engineering, developer, or IT role, you MUST score it below 4, even if it is an internship.
 
 CANDIDATE RESUME:
 ${RESUME_TEXT}

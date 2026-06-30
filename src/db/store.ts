@@ -3,26 +3,22 @@
 // ============================================================
 
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { WatchlistEntry } from '../models/job.js';
 import { CONFIG } from '../config/constants.js';
+import { SCHEMA_SQL } from './schema.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /**
- * Read the SQL schema file once.
- * Split into individual statements and filter by context.
+ * Gets SQL statements for the specified database type.
  */
 function getSchemaStatements(dbType: 'companies' | 'seen_jobs'): string[] {
-  const schemaPath = join(__dirname, 'schema.sql');
-  const fullSchema = readFileSync(schemaPath, 'utf-8');
-
   // Split on semicolons, trim whitespace, filter empty
-  const allStatements = fullSchema
+  const allStatements = SCHEMA_SQL
     .split(';')
     .map(s => s.trim())
     .filter(s => s.length > 0 && !s.startsWith('--'));

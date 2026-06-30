@@ -85,6 +85,7 @@ async function scoreJobWithProvider(
   const client = new OpenAI({
     baseURL: provider.baseUrl,
     apiKey: provider.apiKey,
+    defaultHeaders: { 'Connection': 'close' }, // Fixes "Premature close" fetch bug in Node 22
   });
 
   const prompt = buildPrompt(job);

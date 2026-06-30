@@ -16,9 +16,9 @@
   "author": "Suraj Sharma",
   "license": "MIT",
   "dependencies": {
-    "@duckdb/node-api": "^1.5.0",
-    "@google/genai": "^0.14.0",
-    "better-sqlite3": "^11.0.0"
+    "@duckdb/node-api": "latest",
+    "@google/genai": "latest",
+    "better-sqlite3": "latest"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

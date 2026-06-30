@@ -52,7 +52,7 @@ class AshbyCollector extends ATSCollector {
       return [];
     }
 
-    const data: AshbyResponse = await response.json();
+    const data = await response.json() as AshbyResponse;
 
     if (!data.jobs || !Array.isArray(data.jobs)) {
       return [];

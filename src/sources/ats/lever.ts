@@ -75,7 +75,7 @@ class LeverCollector extends ATSCollector {
         return null;
       }
 
-      const postings: LeverPosting[] = await response.json();
+      const postings = await response.json() as LeverPosting[];
       if (!Array.isArray(postings) || postings.length === 0) break;
 
       allPostings.push(...postings);

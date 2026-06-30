@@ -45,7 +45,7 @@ class GreenhouseCollector extends ATSCollector {
       return [];
     }
 
-    const data: GreenhouseResponse = await response.json();
+    const data = await response.json() as GreenhouseResponse;
     
     return data.jobs.map(job => this.normalize(job, slug, companyName, companyId));
   }

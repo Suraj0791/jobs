@@ -52,8 +52,8 @@ export async function queryParquet<T = Record<string, unknown>>(sql: string): Pr
       for (let row = 0; row < rowCount; row++) {
         const obj: Record<string, unknown> = {};
         for (let col = 0; col < columnCount; col++) {
-          const column = chunk.getColumn(col);
-          obj[columnNames[col]] = column.getItem(row);
+          const columnValues = chunk.getColumnValues(col);
+          obj[columnNames[col]] = columnValues[row];
         }
         rows.push(obj as T);
       }
@@ -61,7 +61,7 @@ export async function queryParquet<T = Record<string, unknown>>(sql: string): Pr
 
     return rows;
   } finally {
-    await connection.close();
+    connection.closeSync();
   }
 }
 
@@ -70,7 +70,7 @@ export async function queryParquet<T = Record<string, unknown>>(sql: string): Pr
  */
 export async function closeDuckDB(): Promise<void> {
   if (instance) {
-    await instance.close();
+    instance.closeSync();
     instance = null;
   }
 }

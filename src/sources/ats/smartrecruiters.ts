@@ -63,7 +63,7 @@ class SmartRecruitersCollector extends ATSCollector {
         return [];
       }
 
-      const data: SmartRecruitersResponse = await response.json();
+      const data = await response.json() as SmartRecruitersResponse;
       
       if (!data.content || !Array.isArray(data.content) || data.content.length === 0) {
         break;

@@ -1,0 +1,39 @@
+name: Weekly Companies Refresh
+
+on:
+  schedule:
+    # Sunday 3:00 AM UTC = 8:30 AM IST
+    - cron: '0 3 * * 0'
+  workflow_dispatch: # Manual trigger from GitHub UI
+
+jobs:
+  refresh-companies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run weekly workflow
+        run: node dist/index.js weekly
+
+      - name: Commit updated databases
+        run: |
+          git config user.name "ai-job-radar[bot]"
+          git config user.email "bot@ai-job-radar"
+          git add data/
+          git diff --cached --quiet || git commit -m "chore: weekly companies + watchlist refresh [skip ci]"
+          git push

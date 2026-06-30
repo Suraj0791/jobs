@@ -1,0 +1,3 @@
+# This directory stores persistent state files (git-tracked)
+# - seen_jobs.db: deduplication tracking
+# - companies.db: company registry + watchlist

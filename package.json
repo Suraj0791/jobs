@@ -1,0 +1,32 @@
+{
+  "name": "ai-job-radar",
+  "version": "1.0.0",
+  "description": "Personal AI-powered job radar that discovers, filters, ranks, and notifies about software engineering jobs",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "hourly": "tsx src/index.ts hourly",
+    "daily": "tsx src/index.ts daily",
+    "weekly": "tsx src/index.ts weekly",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["job-radar", "ai", "automation", "gemini"],
+  "author": "Suraj Sharma",
+  "license": "MIT",
+  "dependencies": {
+    "@duckdb/node-api": "^1.5.0",
+    "@google/genai": "^0.14.0",
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

@@ -1,0 +1,44 @@
+name: Daily OpenJobData Scan
+
+on:
+  schedule:
+    # 4:30 AM UTC = 10:00 AM IST — after OpenJobData publishes daily changes
+    - cron: '30 4 * * *'
+  workflow_dispatch: # Manual trigger from GitHub UI
+
+jobs:
+  scan-openjobdata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run daily workflow
+        run: node dist/index.js daily
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCORE_THRESHOLD: ${{ vars.SCORE_THRESHOLD || '7' }}
+
+      - name: Commit updated state
+        run: |
+          git config user.name "ai-job-radar[bot]"
+          git config user.email "bot@ai-job-radar"
+          git add data/
+          git diff --cached --quiet || git commit -m "chore: update state after daily scan [skip ci]"
+          git push

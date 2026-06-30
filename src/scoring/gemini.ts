@@ -94,7 +94,7 @@ Respond with ONLY valid JSON (no markdown, no backticks, no explanation):
  * Score a single job with Gemini.
  * Returns null if the API call fails (doesn't throw).
  */
-async function scoreJob(job: Job): Promise<GeminiScoreResult | null> {
+async function scoreJob(job: Job, retries = 1): Promise<GeminiScoreResult | null> {
   const client = getClient();
   const prompt = buildPrompt(job);
 
@@ -135,10 +135,13 @@ async function scoreJob(job: Job): Promise<GeminiScoreResult | null> {
   } catch (error) {
     const err = error as Error;
     if (err.message?.includes('429') || err.message?.includes('RATE_LIMIT')) {
-      console.log(`    ⏳ Rate limited by Gemini, waiting 30s...`);
-      await sleep(30000);
-      // One retry after rate limit
-      return scoreJob(job);
+      if (retries > 0) {
+        console.log(`    ⏳ Rate limited by Gemini, waiting 30s...`);
+        await sleep(30000);
+        return scoreJob(job, retries - 1);
+      }
+      console.log(`    ⚠ Gemini rate limit exceeded for "${job.title}", giving up.`);
+      return null;
     }
     console.log(`    ⚠ Gemini error for "${job.title}": ${err.message}`);
     return null;

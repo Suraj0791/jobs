@@ -1,5 +1,7 @@
 // ============================================================
 // Universal LLM Scorer — AI-powered job matching with Automatic Fallback
+// + Circuit Breaker: dead providers are skipped for the rest of the run
+// + Time Budget: scoring stops after 45 minutes so notify/commit always run
 // ============================================================
 
 import OpenAI from 'openai';
@@ -7,6 +9,29 @@ import type { Job, GeminiScoreResult as LlmScoreResult, ScoredJob } from '../mod
 import { RESUME_TEXT } from '../config/resume.js';
 import { USER_PROFILE } from '../config/profile.js';
 import { CONFIG } from '../config/constants.js';
+
+/** How long scoring is allowed to run before we bail out (ms). */
+const SCORING_BUDGET_MS = 45 * 60 * 1000; // 45 minutes
+
+/**
+ * Per-provider circuit breaker state.
+ * A provider is marked "dead" after 2 consecutive failures in this run.
+ * It is NEVER retried for the rest of the run — we skip it in 0 ms.
+ */
+const providerFailures = new Map<string, number>(); // name → consecutive failures
+const DEAD_THRESHOLD = 2; // mark dead after this many consecutive failures
+
+function isProviderDead(name: string): boolean {
+  return (providerFailures.get(name) ?? 0) >= DEAD_THRESHOLD;
+}
+
+function recordFailure(name: string): void {
+  providerFailures.set(name, (providerFailures.get(name) ?? 0) + 1);
+}
+
+function recordSuccess(name: string): void {
+  providerFailures.set(name, 0); // reset on success
+}
 
 /**
  * Build the scoring prompt for a single job.
@@ -124,34 +149,57 @@ async function scoreJobWithProvider(
 }
 
 /**
- * Score a single job with Automatic Fallback.
- * Tries providers in order until one succeeds or all fail.
+ * Score a single job with Automatic Fallback + Circuit Breaker.
+ *
+ * - Providers marked dead (≥2 consecutive failures this run) are skipped instantly.
+ * - Any failure (429, 400, 5xx, etc.) increments the failure counter.
+ * - A success resets the counter for that provider.
+ *
+ * @returns { result, delayMs } on success, null if all providers are dead/failed.
  */
 async function scoreJob(job: Job): Promise<{ result: LlmScoreResult; delayMs: number } | null> {
   const providers = CONFIG.llmProviders;
-  
+
   if (providers.length === 0) {
     console.log(`    ⚠ No API keys provided in environment (need GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY)`);
     return null;
   }
 
   for (const provider of providers) {
+    // ── Circuit breaker: skip dead providers immediately ──
+    if (isProviderDead(provider.name)) {
+      console.log(`    ⚡ ${provider.name} is circuit-broken — skipping`);
+      continue;
+    }
+
     try {
       const result = await scoreJobWithProvider(job, provider);
+      recordSuccess(provider.name);
       return { result, delayMs: provider.delayMs };
     } catch (error) {
       const err = error as Error;
-      
-      // If it's a 429 Rate Limit, we instantly fallback to the next provider
-      if (err.message?.includes('429') || err.message?.includes('RATE_LIMIT')) {
-        console.log(`    ⚠ Rate limit hit on ${provider.name}. Falling back...`);
-        continue; // Try next provider
+
+      // Classify the error for logging
+      const isRateLimit = err.message?.includes('429') || err.message?.includes('RATE_LIMIT') || err.message?.includes('rate_limit');
+      const label = isRateLimit ? '⚠ Rate limit hit' : `⚠ Error`;
+
+      console.log(`    ${label} on ${provider.name}. Falling back...`);
+
+      // Record failure — after DEAD_THRESHOLD consecutive failures, provider is dead for this run
+      recordFailure(provider.name);
+      if (isProviderDead(provider.name)) {
+        console.log(`    🔴 ${provider.name} is now circuit-broken for the rest of this run`);
       }
-      
-      console.log(`    ⚠ ${provider.name} error for "${job.title}": ${err.message}`);
-      // On other errors (e.g. 500), we also try the next provider
-      continue;
+
+      continue; // Try next provider
     }
+  }
+
+  // All providers tried (or dead)
+  const allDead = providers.every(p => isProviderDead(p.name));
+  if (allDead) {
+    console.log(`    💀 All providers are circuit-broken. Stopping scoring early.`);
+    return null;
   }
 
   console.log(`    ❌ All available LLM providers failed for "${job.title}". Giving up.`);
@@ -159,7 +207,11 @@ async function scoreJob(job: Job): Promise<{ result: LlmScoreResult; delayMs: nu
 }
 
 /**
- * Score a batch of jobs with Automatic Fallback.
+ * Score a batch of jobs with Automatic Fallback + Circuit Breaker + Time Budget.
+ *
+ * Returns only the jobs that were actually scored.
+ * Jobs skipped due to dead providers or the time budget are NOT included —
+ * callers should NOT mark them as "seen" so they get retried next run.
  */
 export async function scoreJobs(jobs: Job[]): Promise<ScoredJob[]> {
   if (jobs.length === 0) return [];
@@ -183,8 +235,26 @@ export async function scoreJobs(jobs: Job[]): Promise<ScoredJob[]> {
   const results: ScoredJob[] = [];
   let scored = 0;
   let failed = 0;
+  let skippedBudget = 0;
+
+  const budgetDeadline = Date.now() + SCORING_BUDGET_MS;
 
   for (const job of jobsToScore) {
+    // ── Time budget guard ──
+    if (Date.now() >= budgetDeadline) {
+      skippedBudget = jobsToScore.length - scored;
+      console.log(`  ⏱ Time budget exhausted — skipping remaining ${skippedBudget} jobs (they'll retry next run)`);
+      break;
+    }
+
+    // ── All providers dead guard ──
+    const liveProviders = providers.filter(p => !isProviderDead(p.name));
+    if (liveProviders.length === 0) {
+      skippedBudget = jobsToScore.length - scored;
+      console.log(`  💀 All providers circuit-broken — skipping remaining ${skippedBudget} jobs (they'll retry next run)`);
+      break;
+    }
+
     scored++;
     const progress = `[${scored}/${jobsToScore.length}]`;
     console.log(`  ${progress} Scoring: "${job.title}" at ${job.company || 'Unknown'}`);
@@ -194,7 +264,7 @@ export async function scoreJobs(jobs: Job[]): Promise<ScoredJob[]> {
     if (res && res.result) {
       results.push({ job, score: res.result });
       console.log(`    → Score: ${res.result.score} ${res.result.apply ? '✅' : '❌'} — ${res.result.reason.slice(0, 80)}`);
-      
+
       // Wait based on the successful provider's preferred delay
       if (scored < jobsToScore.length) {
         await sleep(res.delayMs);
@@ -208,7 +278,8 @@ export async function scoreJobs(jobs: Job[]): Promise<ScoredJob[]> {
     }
   }
 
-  console.log(`  ✓ LLM scoring complete: ${results.length} scored, ${failed} failed`);
+  const timeLeft = Math.round((budgetDeadline - Date.now()) / 1000);
+  console.log(`  ✓ LLM scoring complete: ${results.length} scored, ${failed} failed, ${skippedBudget} skipped (${timeLeft}s budget remaining)`);
 
   return results;
 }

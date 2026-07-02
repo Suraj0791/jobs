@@ -92,6 +92,12 @@ export async function runHourlyWorkflow(): Promise<void> {
   const seenStore = new SeenJobsStore();
 
   try {
+    // Recover jobs that were marked "seen" in previous broken runs (score IS NULL = never scored)
+    const recovered = seenStore.clearUnscored();
+    if (recovered > 0) {
+      console.log(`  ♻ Recovered ${recovered} previously-failed jobs from seen_jobs.db`);
+    }
+
     // Step 1: Load watchlist
     const watchlist = companiesStore.getWatchlist();
     console.log(`\n📋 Watchlist: ${watchlist.length} companies`);
@@ -175,7 +181,9 @@ export async function runHourlyWorkflow(): Promise<void> {
     // Step 8: Auto-promote high-scoring companies
     stats.companiesPromoted = promoteHighScoringCompanies(passingJobs, companiesStore);
 
-    // Step 9: Mark ALL scored jobs as seen (not just passing ones)
+    // Step 9: Mark ONLY actually-scored jobs as seen.
+    // Jobs skipped due to circuit-broken providers or time budget are NOT in scoredJobs,
+    // so they stay unseen and will be retried automatically next run.
     const scoreMap = new Map<string, { score: number; notified: boolean }>();
     for (const sj of scoredJobs) {
       scoreMap.set(getJobKey(sj.job), {
@@ -183,7 +191,8 @@ export async function runHourlyWorkflow(): Promise<void> {
         notified: sj.score.score >= CONFIG.scoreThreshold,
       });
     }
-    markSeen(unseenJobs, seenStore, scoreMap);
+    const scoredJobIds = new Set(scoredJobs.map(sj => getJobKey(sj.job)));
+    markSeen(unseenJobs.filter(j => scoredJobIds.has(getJobKey(j))), seenStore, scoreMap);
 
     // Step 10: Summary
     await notifySummary(stats);

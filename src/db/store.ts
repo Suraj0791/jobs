@@ -278,6 +278,18 @@ export class SeenJobsStore {
     return row.count;
   }
 
+  /**
+   * Remove seen_jobs entries that were never actually scored (score IS NULL).
+   * These are jobs that were marked "seen" during a broken run where all LLM
+   * providers failed. Calling this at the start of a run recovers them so they
+   * get properly scored on the next attempt.
+   * Returns the number of rows removed.
+   */
+  clearUnscored(): number {
+    const result = this.db.prepare('DELETE FROM seen_jobs WHERE score IS NULL').run();
+    return result.changes;
+  }
+
   /** Close the database connection */
   close(): void {
     this.db.close();

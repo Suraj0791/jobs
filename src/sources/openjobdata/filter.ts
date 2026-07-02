@@ -96,12 +96,13 @@ export async function filterDailyChanges(parquetPath: string): Promise<Job[]> {
       (status = 'active' OR status IS NULL)
 
       -- Location: India (any work type) OR remote worldwide
+      -- NOTE: The parquet stores ISO 2-letter country codes, not full country names.
+      -- 'IN' = India. Remote jobs have is_remote=true or workplace_type='remote'.
       AND (
-        LOWER(COALESCE(country, '')) = 'india'
+        country = 'IN'
         OR COALESCE(is_remote, false) = true
         OR LOWER(COALESCE(workplace_type, '')) = 'remote'
-        OR LOWER(COALESCE(country, '')) LIKE '%remote%'
-        OR LOWER(COALESCE(country, '')) LIKE '%anywhere%'
+        OR LOWER(COALESCE(workplace_type, '')) LIKE '%remote%'
       )
 
       -- Title: must match at least one include keyword
@@ -118,6 +119,27 @@ export async function filterDailyChanges(parquetPath: string): Promise<Job[]> {
   const rows = await queryParquet<ParquetJobRow>(sql);
 
   console.log(`  ✓ DuckDB filter: ${rows.length} jobs passed`);
+
+  // If nothing passed, print a sample of country + workplace_type values so we
+  // can diagnose whether the country code / remote flag assumption is wrong.
+  if (rows.length === 0) {
+    try {
+      const sample = await queryParquet<{ country: string | null; workplace_type: string | null; is_remote: boolean | null; cnt: number }>(`
+        SELECT country, workplace_type, is_remote, COUNT(*) AS cnt
+        FROM read_parquet('${safePath}')
+        WHERE (status = 'active' OR status IS NULL)
+        GROUP BY country, workplace_type, is_remote
+        ORDER BY cnt DESC
+        LIMIT 20
+      `);
+      console.log('  🔎 DIAGNOSTIC — top country/workplace combos in active jobs:');
+      for (const r of sample) {
+        console.log(`     country=${JSON.stringify(r.country)}  workplace_type=${JSON.stringify(r.workplace_type)}  is_remote=${r.is_remote}  count=${r.cnt}`);
+      }
+    } catch {
+      // diagnostic failure is non-fatal
+    }
+  }
 
   // Normalize to unified Job model
   return rows.map(row => normalizeParquetRow(row));

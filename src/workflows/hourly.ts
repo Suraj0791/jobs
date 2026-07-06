@@ -9,7 +9,7 @@ import { filterUnseen, markSeen, getJobKey } from '../dedup/deduplicator.js';
 import { scoreJobs, filterByThreshold } from '../scoring/llm.js';
 import { notifyJobMatches, notifySummary } from '../notify/telegram.js';
 import { promoteHighScoringCompanies } from '../watchlist/promoter.js';
-import { TITLE_INCLUDE_KEYWORDS, TITLE_EXCLUDE_KEYWORDS, SUPPORTED_ATS, CONFIG } from '../config/constants.js';
+import { TITLE_INCLUDE_KEYWORDS, TITLE_EXCLUDE_KEYWORDS, SUPPORTED_ATS, CONFIG, DEDUP_TTL_DAYS } from '../config/constants.js';
 
 // Import collectors to trigger self-registration
 import '../sources/ats/greenhouse.js';
@@ -96,6 +96,13 @@ export async function runHourlyWorkflow(): Promise<void> {
     const recovered = seenStore.clearUnscored();
     if (recovered > 0) {
       console.log(`  ♻ Recovered ${recovered} previously-failed jobs from seen_jobs.db`);
+    }
+
+    // Expire stale dedup entries to prevent permanent starvation.
+    // Jobs older than DEDUP_TTL_DAYS become re-eligible for scoring.
+    const expired = seenStore.expireOldSeenJobs(DEDUP_TTL_DAYS);
+    if (expired > 0) {
+      console.log(`  🗑 Expired ${expired} stale dedup entries (older than ${DEDUP_TTL_DAYS} days)`);
     }
 
     // Step 1: Load watchlist

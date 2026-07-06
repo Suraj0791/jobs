@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 
 CREATE INDEX IF NOT EXISTS idx_watchlist_ats ON watchlist(ats);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_watchlist_ats_slug ON watchlist(ats, slug);
 `;
 
 export const SEEN_JOBS_SCHEMA = `

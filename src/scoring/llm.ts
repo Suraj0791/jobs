@@ -1,7 +1,12 @@
 // ============================================================
-// Universal LLM Scorer — AI-powered job matching with Automatic Fallback
-// + Circuit Breaker: dead providers are skipped for the rest of the run
-// + Time Budget: scoring stops after 45 minutes so notify/commit always run
+// Universal LLM Scorer — Robust, battle-hardened job scoring
+//
+// Failure modes handled:
+//   1. 429 Rate-limit   → 65 s per-provider cooldown (not a circuit-break)
+//   2. LLM hang/timeout → 45 s hard timeout via OpenAI SDK `timeout` param
+//   3. Hard errors      → 5xx / auth / parse / network → circuit-break after 3
+//   4. All blocked      → wait for soonest cooldown to expire, retry once
+//   5. Time budget      → bail after 45 min so notify/commit always run
 // ============================================================
 
 import OpenAI from 'openai';
@@ -10,32 +15,98 @@ import { RESUME_TEXT } from '../config/resume.js';
 import { USER_PROFILE } from '../config/profile.js';
 import { CONFIG } from '../config/constants.js';
 
-/** How long scoring is allowed to run before we bail out (ms). */
-const SCORING_BUDGET_MS = 45 * 60 * 1000; // 45 minutes
+// ── Tunables ──────────────────────────────────────────────────────────────────
+
+/** Max wall-clock time for the entire scoring loop (ms). */
+const SCORING_BUDGET_MS = 45 * 60 * 1000; // 45 min
 
 /**
- * Per-provider circuit breaker state.
- * A provider is marked "dead" after 2 consecutive failures in this run.
- * It is NEVER retried for the rest of the run — we skip it in 0 ms.
+ * Hard timeout for a single LLM API call (ms).
+ * Passed directly to the OpenAI SDK — kills hung requests at the HTTP level.
  */
-const providerFailures = new Map<string, number>(); // name → consecutive failures
-const DEAD_THRESHOLD = 2; // mark dead after this many consecutive failures
+const CALL_TIMEOUT_MS = 45_000; // 45 s
 
-function isProviderDead(name: string): boolean {
-  return (providerFailures.get(name) ?? 0) >= DEAD_THRESHOLD;
+/** Cooldown after a 429 — Groq resets TPM every 60 s, +5 s buffer. */
+const RATE_LIMIT_COOLDOWN_MS = 65_000; // 65 s
+
+/** Provider dies after this many consecutive *hard* errors (not rate limits). */
+const DEAD_THRESHOLD = 3;
+
+// ── Rate-limit cooldown state ─────────────────────────────────────────────────
+
+const rateLimitCooldownUntil = new Map<string, number>(); // name → epoch ms
+
+function isRateLimited(name: string): boolean {
+  return Date.now() < (rateLimitCooldownUntil.get(name) ?? 0);
 }
 
-function recordFailure(name: string): void {
-  providerFailures.set(name, (providerFailures.get(name) ?? 0) + 1);
+function rateLimitResumeIn(name: string): number {
+  return Math.max(0, Math.ceil(((rateLimitCooldownUntil.get(name) ?? 0) - Date.now()) / 1000));
+}
+
+function recordRateLimit(name: string): void {
+  const until = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+  rateLimitCooldownUntil.set(name, until);
+  console.log(`    🕐 ${name} rate-limited — cooling down ${Math.ceil(RATE_LIMIT_COOLDOWN_MS / 1000)}s (until ${new Date(until).toISOString()})`);
+}
+
+// ── Hard-error circuit breaker ────────────────────────────────────────────────
+
+const hardFailures = new Map<string, number>(); // name → consecutive count
+
+function isProviderDead(name: string): boolean {
+  return (hardFailures.get(name) ?? 0) >= DEAD_THRESHOLD;
+}
+
+function recordHardFailure(name: string, reason: string): void {
+  const count = (hardFailures.get(name) ?? 0) + 1;
+  hardFailures.set(name, count);
+  if (count >= DEAD_THRESHOLD) {
+    console.log(`    🔴 ${name} circuit-broken (${count} hard errors): ${reason}`);
+  } else {
+    console.log(`    ⚠ ${name} hard error ${count}/${DEAD_THRESHOLD} (${reason}) — falling back`);
+  }
 }
 
 function recordSuccess(name: string): void {
-  providerFailures.set(name, 0); // reset on success
+  hardFailures.set(name, 0);
+  // Rate-limit cooldown expires naturally — don't clear it on success.
 }
 
-/**
- * Build the scoring prompt for a single job.
- */
+// ── Error classifier ──────────────────────────────────────────────────────────
+
+type ErrorKind = 'rate_limit' | 'timeout' | 'hard_error';
+
+function classifyError(err: Error): ErrorKind {
+  const msg = (err.message ?? '').toLowerCase();
+  const name = (err.name ?? '').toLowerCase();
+  const ctor = (err.constructor?.name ?? '').toLowerCase();
+
+  if (
+    msg.includes('429') ||
+    msg.includes('too many requests') ||
+    msg.includes('rate_limit') ||
+    msg.includes('rate limit') ||
+    msg.includes('ratelimit') ||
+    ctor === 'ratelimiterror'
+  ) return 'rate_limit';
+
+  if (
+    msg.includes('timeout') ||
+    msg.includes('timed out') ||
+    msg.includes('time out') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('aborted') ||
+    name === 'aborterror' ||
+    ctor === 'aborterror'
+  ) return 'timeout';
+
+  return 'hard_error';
+}
+
+// ── Prompt builder ────────────────────────────────────────────────────────────
+
 function buildPrompt(job: Job): string {
   const profileSummary = `
 TARGET CANDIDATE PROFILE:
@@ -60,7 +131,7 @@ JOB DETAILS:
 - Department: ${job.department || 'Not specified'}
 - Posted: ${job.postedAt || 'Unknown'}
 - ATS: ${job.ats}
-${job.description ? `\nJOB DESCRIPTION:\n${job.description.slice(0, 3000)}` : '(No description available — score based on title, company, and location only)'}
+${job.description ? `\nJOB DESCRIPTION:\n${job.description.slice(0, 3000)}` : '(No description — score based on title, company, and location only)'}
 `.trim();
 
   return `You are a job matching assistant for a final-year computer science student in India.
@@ -73,12 +144,12 @@ Score how well this job matches the candidate. Consider:
 5. Would this be a realistic application given their experience?
 
 IMPORTANT: The candidate is a final year B.Tech student graduating May 2027 with internship experience.
-CRITICAL INSTRUCTION ON TECH STACK: For Entry-Level and Internship Software Engineering / SDE roles, companies often hire language-agnostically and focus on Data Structures and Algorithms (DSA) or general problem-solving. DO NOT penalize the score if the job requires a different backend language (e.g., Java, Go, C#) AS LONG AS it is an intern, fresher, or entry-level software engineering role.
+CRITICAL INSTRUCTION ON TECH STACK: For Entry-Level and Internship Software Engineering / SDE roles, companies often hire language-agnostically and focus on DSA / general problem-solving. DO NOT penalize if the job requires a different backend language (Java, Go, C#) AS LONG AS it is an intern, fresher, or entry-level SDE role.
 
-- Score 9-10: Perfect match — right level, right location, right company type. Tech stack is either a perfect match, OR it's a general entry-level/intern SDE role where language doesn't strictly matter.
-- Score 7-8: Good match — mostly aligned, maybe slightly above level, or specific stack requirements that might be a slight hurdle but still worth applying.
-- Score 5-6: Partial match — right field but clearly requires senior experience, or strictly requires a deeply specialized skill (e.g., specific machine learning framework) the candidate lacks.
-- Score 0-4: Poor match — completely unrelated field (e.g., HR, Sales, Basketball, Editing, Production), far too senior, or wrong location. CRITICAL: If the job is NOT a software engineering, developer, or IT role, you MUST score it below 4, even if it is an internship.
+- Score 9-10: Perfect match — right level, right location, right company type.
+- Score 7-8: Good match — mostly aligned, minor hurdles.
+- Score 5-6: Partial match — right field but clearly requires senior experience.
+- Score 0-4: Poor match — unrelated field, far too senior, or wrong location. If NOT a software/developer/IT role, MUST score below 4.
 
 CANDIDATE RESUME:
 ${RESUME_TEXT}
@@ -87,7 +158,7 @@ ${profileSummary}
 
 ${jobDetails}
 
-Respond with ONLY valid JSON (no markdown, no backticks, no explanation):
+Respond with ONLY valid JSON (no markdown, no backticks):
 {
   "score": <number 0-10, one decimal>,
   "apply": <boolean>,
@@ -99,18 +170,18 @@ Respond with ONLY valid JSON (no markdown, no backticks, no explanation):
 }`;
 }
 
-/**
- * Score a single job using the given LLM provider.
- * Uses the universal OpenAI SDK format.
- */
+// ── Single provider call ──────────────────────────────────────────────────────
+
 async function scoreJobWithProvider(
   job: Job,
   provider: { name: string; baseUrl: string; apiKey: string; model: string; delayMs: number }
 ): Promise<LlmScoreResult> {
+  // timeout is a first-class OpenAI SDK option — kills hung HTTP requests cleanly.
   const client = new OpenAI({
     baseURL: provider.baseUrl,
     apiKey: provider.apiKey,
-    defaultHeaders: { 'Connection': 'close' }, // Fixes "Premature close" fetch bug in Node 22
+    timeout: CALL_TIMEOUT_MS,
+    defaultHeaders: { 'Connection': 'close' }, // Fixes "Premature close" in Node 22+
   });
 
   const prompt = buildPrompt(job);
@@ -124,18 +195,16 @@ async function scoreJobWithProvider(
   });
 
   const text = response.choices[0]?.message?.content?.trim();
-  if (!text) {
-    throw new Error('Empty LLM response');
-  }
+  if (!text) throw new Error('Empty LLM response');
 
-  // Fallback cleanup if provider ignores json_object format
+  // Strip accidental markdown fences some providers add despite response_format
   const cleaned = text
     .replace(/^```json\s*/i, '')
     .replace(/^```\s*/i, '')
     .replace(/\s*```$/i, '')
     .trim();
 
-  const parsed = JSON.parse(cleaned);
+  const parsed = JSON.parse(cleaned); // throws SyntaxError → caught as hard_error upstream
 
   return {
     score: typeof parsed.score === 'number' ? parsed.score : 0,
@@ -148,70 +217,149 @@ async function scoreJobWithProvider(
   };
 }
 
+// ── Provider status helpers ───────────────────────────────────────────────────
+
+type Provider = { name: string; baseUrl: string; apiKey: string; model: string; delayMs: number };
+
+/** Returns a snapshot of each provider's current state. */
+function describeProviders(providers: Provider[]): string {
+  return providers.map(p => {
+    if (isProviderDead(p.name)) return `${p.name}:dead`;
+    if (isRateLimited(p.name)) return `${p.name}:rl(${rateLimitResumeIn(p.name)}s)`;
+    return `${p.name}:ok`;
+  }).join(' | ');
+}
+
+// ── Per-job scoring with full fallback ────────────────────────────────────────
+
 /**
- * Score a single job with Automatic Fallback + Circuit Breaker.
+ * Score one job. Tries every provider in order. Handles:
+ *  - Dead providers   → skip immediately
+ *  - Rate-limited     → skip (they'll recover in <65s)
+ *  - 429 during call  → mark rate-limited, try next
+ *  - Timeout          → count as hard error, try next
+ *  - Hard error       → count toward circuit-break, try next
+ *  - All rate-limited → wait for soonest cooldown, retry once
+ *  - All dead         → return null (stops the batch loop)
  *
- * - Providers marked dead (≥2 consecutive failures this run) are skipped instantly.
- * - Any failure (429, 400, 5xx, etc.) increments the failure counter.
- * - A success resets the counter for that provider.
- *
- * @returns { result, delayMs } on success, null if all providers are dead/failed.
+ * @returns scored result, or null if every provider is dead/exhausted.
  */
 async function scoreJob(job: Job): Promise<{ result: LlmScoreResult; delayMs: number } | null> {
   const providers = CONFIG.llmProviders;
 
   if (providers.length === 0) {
-    console.log(`    ⚠ No API keys provided in environment (need GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY)`);
+    console.log('    ⚠ No API keys configured');
     return null;
   }
 
-  for (const provider of providers) {
-    // ── Circuit breaker: skip dead providers immediately ──
-    if (isProviderDead(provider.name)) {
-      console.log(`    ⚡ ${provider.name} is circuit-broken — skipping`);
-      continue;
-    }
+  /**
+   * Inner helper: attempt each provider once.
+   * Returns:
+   *   { result, delayMs }  — success
+   *   'all_dead'           — every provider is hard-dead, abort the run
+   *   'all_rate_limited'   — every live provider is in cooldown, caller should wait
+   *   null                 — tried at least one, all failed with hard errors
+   */
+  async function attempt(): Promise<{ result: LlmScoreResult; delayMs: number } | 'all_dead' | 'all_rate_limited' | null> {
+    // Snapshot states before looping so we make a consistent decision.
+    const dead = providers.filter(p => isProviderDead(p.name));
+    const limited = providers.filter(p => !isProviderDead(p.name) && isRateLimited(p.name));
+    const available = providers.filter(p => !isProviderDead(p.name) && !isRateLimited(p.name));
 
-    try {
-      const result = await scoreJobWithProvider(job, provider);
-      recordSuccess(provider.name);
-      return { result, delayMs: provider.delayMs };
-    } catch (error) {
-      const err = error as Error;
+    if (dead.length === providers.length) return 'all_dead';
+    if (available.length === 0) return 'all_rate_limited'; // only dead + rate-limited remain
 
-      // Classify the error for logging
-      const isRateLimit = err.message?.includes('429') || err.message?.includes('RATE_LIMIT') || err.message?.includes('rate_limit');
-      const label = isRateLimit ? '⚠ Rate limit hit' : `⚠ Error`;
+    // Try each available provider
+    for (const provider of available) {
+      try {
+        const result = await scoreJobWithProvider(job, provider);
+        recordSuccess(provider.name);
+        return { result, delayMs: provider.delayMs };
+      } catch (error) {
+        const err = error as Error;
+        const kind = classifyError(err);
+        const shortMsg = err.message?.slice(0, 120) ?? 'unknown';
 
-      console.log(`    ${label} on ${provider.name}. Falling back...`);
-
-      // Record failure — after DEAD_THRESHOLD consecutive failures, provider is dead for this run
-      recordFailure(provider.name);
-      if (isProviderDead(provider.name)) {
-        console.log(`    🔴 ${provider.name} is now circuit-broken for the rest of this run`);
+        if (kind === 'rate_limit') {
+          console.log(`    ⚠ Rate limit on ${provider.name} — falling back`);
+          recordRateLimit(provider.name);
+        } else if (kind === 'timeout') {
+          console.log(`    ⚠ Timeout on ${provider.name} (>${CALL_TIMEOUT_MS / 1000}s) — falling back`);
+          recordHardFailure(provider.name, 'timeout');
+        } else {
+          console.log(`    ⚠ Error on ${provider.name}: ${shortMsg} — falling back`);
+          recordHardFailure(provider.name, shortMsg);
+        }
       }
-
-      continue; // Try next provider
     }
+
+    // All available providers were tried and all failed.
+    // Check again: are all survivors now rate-limited (429 during this loop)?
+    const stillLive = providers.filter(p => !isProviderDead(p.name));
+    if (stillLive.length > 0 && stillLive.every(p => isRateLimited(p.name))) {
+      return 'all_rate_limited';
+    }
+
+    return null; // genuine failure — all tried, all hard errors
   }
 
-  // All providers tried (or dead)
-  const allDead = providers.every(p => isProviderDead(p.name));
-  if (allDead) {
-    console.log(`    💀 All providers are circuit-broken. Stopping scoring early.`);
+  // ── First attempt ──
+  const first = await attempt();
+
+  if (first === 'all_dead') {
+    // Caller (scoreJobs) will detect this and stop the loop
+    console.log(`    💀 All providers are circuit-broken`);
     return null;
   }
 
-  console.log(`    ❌ All available LLM providers failed for "${job.title}". Giving up.`);
-  return null;
+  if (first !== null && first !== 'all_rate_limited') {
+    return first; // success
+  }
+
+  // ── first === null (all tried, all hard-failed) — skip this job ──
+  if (first === null) {
+    console.log(`    ❌ All providers failed for "${job.title}" — skipping`);
+    return null;
+  }
+
+  // ── first === 'all_rate_limited' — wait for earliest cooldown, then retry ──
+  const soonestMs = providers
+    .filter(p => !isProviderDead(p.name))
+    .map(p => rateLimitCooldownUntil.get(p.name) ?? 0)
+    .reduce((a, b) => Math.min(a, b), Infinity);
+
+  if (!isFinite(soonestMs)) {
+    // Shouldn't happen but guard anyway
+    console.log(`    ❌ All providers rate-limited but no cooldown timestamp found — skipping`);
+    return null;
+  }
+
+  const waitMs = Math.max(0, soonestMs - Date.now()) + 2000; // +2 s buffer
+  console.log(`    ⏳ All providers rate-limited — waiting ${Math.ceil(waitMs / 1000)}s then retrying (${describeProviders(providers)})`);
+  await sleep(waitMs);
+
+  // ── Retry after wait ──
+  const second = await attempt();
+
+  if (second === 'all_dead') {
+    console.log(`    💀 All providers circuit-broken after wait`);
+    return null;
+  }
+  if (second === 'all_rate_limited' || second === null) {
+    console.log(`    ❌ Retry after wait also failed for "${job.title}" — skipping`);
+    return null;
+  }
+  return second;
 }
 
+// ── Batch scoring (public API) ────────────────────────────────────────────────
+
 /**
- * Score a batch of jobs with Automatic Fallback + Circuit Breaker + Time Budget.
+ * Score a batch of jobs.
  *
- * Returns only the jobs that were actually scored.
- * Jobs skipped due to dead providers or the time budget are NOT included —
- * callers should NOT mark them as "seen" so they get retried next run.
+ * - Scored jobs are returned (and should be marked seen by the caller).
+ * - Skipped/failed jobs are NOT returned — caller must NOT mark them seen
+ *   so they are retried automatically next run.
  */
 export async function scoreJobs(jobs: Job[]): Promise<ScoredJob[]> {
   if (jobs.length === 0) return [];
@@ -224,62 +372,66 @@ export async function scoreJobs(jobs: Job[]): Promise<ScoredJob[]> {
   }
 
   const providers = CONFIG.llmProviders;
-  if (providers.length > 0) {
-    console.log(`  🤖 Scoring ${jobsToScore.length} jobs using universal fallback:`);
-    providers.forEach((p, i) => console.log(`     #${i + 1} - ${p.name} (${p.model})`));
-  } else {
-    console.log(`  🤖 No LLM Providers configured!`);
+  if (providers.length === 0) {
+    console.log('  🤖 No LLM providers configured — skipping scoring');
     return [];
   }
 
+  console.log(`  🤖 Scoring ${jobsToScore.length} jobs (call timeout: ${CALL_TIMEOUT_MS / 1000}s):`);
+  providers.forEach((p, i) => console.log(`     #${i + 1} - ${p.name} (${p.model})`));
+
   const results: ScoredJob[] = [];
-  let scored = 0;
+  let attempted = 0;
   let failed = 0;
-  let skippedBudget = 0;
+  let skipped = 0;
 
   const budgetDeadline = Date.now() + SCORING_BUDGET_MS;
 
-  for (const job of jobsToScore) {
+  for (let i = 0; i < jobsToScore.length; i++) {
+    const job = jobsToScore[i];
+    const remaining = jobsToScore.length - i;
+
     // ── Time budget guard ──
     if (Date.now() >= budgetDeadline) {
-      skippedBudget = jobsToScore.length - scored;
-      console.log(`  ⏱ Time budget exhausted — skipping remaining ${skippedBudget} jobs (they'll retry next run)`);
+      skipped = remaining;
+      console.log(`  ⏱ Time budget exhausted — skipping ${skipped} remaining jobs (retry next run)`);
       break;
     }
 
-    // ── All providers dead guard ──
-    const liveProviders = providers.filter(p => !isProviderDead(p.name));
-    if (liveProviders.length === 0) {
-      skippedBudget = jobsToScore.length - scored;
-      console.log(`  💀 All providers circuit-broken — skipping remaining ${skippedBudget} jobs (they'll retry next run)`);
+    // ── All providers permanently dead guard ──
+    if (providers.every(p => isProviderDead(p.name))) {
+      skipped = remaining;
+      console.log(`  💀 All providers circuit-broken — skipping ${skipped} remaining jobs (retry next run)`);
       break;
     }
 
-    scored++;
-    const progress = `[${scored}/${jobsToScore.length}]`;
-    console.log(`  ${progress} Scoring: "${job.title}" at ${job.company || 'Unknown'}`);
+    attempted++;
+    console.log(`  [${attempted}/${jobsToScore.length}] Scoring: "${job.title}" at ${job.company || 'Unknown'}`);
 
     const res = await scoreJob(job);
 
-    if (res && res.result) {
+    if (res) {
       results.push({ job, score: res.result });
-      console.log(`    → Score: ${res.result.score} ${res.result.apply ? '✅' : '❌'} — ${res.result.reason.slice(0, 80)}`);
+      const mark = res.result.apply ? '✅' : '❌';
+      console.log(`    → Score: ${res.result.score} ${mark} — ${res.result.reason.slice(0, 80)}`);
 
-      // Wait based on the successful provider's preferred delay
-      if (scored < jobsToScore.length) {
+      // Wait between jobs to respect provider rate limits
+      const isLast = i === jobsToScore.length - 1;
+      if (!isLast) {
         await sleep(res.delayMs);
       }
     } else {
       failed++;
-      // If all providers failed, we still wait a tiny bit to avoid hammering APIs
-      if (scored < jobsToScore.length) {
+      // Brief pause before the next job even on total failure, avoid hammering
+      const isLast = i === jobsToScore.length - 1;
+      if (!isLast) {
         await sleep(2000);
       }
     }
   }
 
   const timeLeft = Math.round((budgetDeadline - Date.now()) / 1000);
-  console.log(`  ✓ LLM scoring complete: ${results.length} scored, ${failed} failed, ${skippedBudget} skipped (${timeLeft}s budget remaining)`);
+  console.log(`  ✓ Scoring done: ${results.length} scored, ${failed} failed, ${skipped} skipped (${timeLeft}s budget left)`);
 
   return results;
 }
@@ -294,7 +446,6 @@ export function filterByThreshold(scoredJobs: ScoredJob[]): ScoredJob[] {
   return passing;
 }
 
-/** Simple sleep utility */
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }

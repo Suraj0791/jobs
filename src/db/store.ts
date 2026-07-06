@@ -32,6 +32,20 @@ export class CompaniesStore {
 
   private init(): void {
     this.db.exec(COMPANIES_SCHEMA);
+    // Safe migration: deduplicate (ats, slug) before the unique index is created.
+    // The unique index uses CREATE UNIQUE INDEX IF NOT EXISTS, which silently
+    // skips if it already exists, but will error if duplicates exist when first run.
+    // We purge duplicates first, keeping the row with the lowest company_id.
+    try {
+      this.db.exec(`
+        DELETE FROM watchlist
+        WHERE rowid NOT IN (
+          SELECT MIN(rowid) FROM watchlist GROUP BY ats, slug
+        )
+      `);
+    } catch {
+      // If watchlist table doesn't exist yet, this is a no-op (fine)
+    }
   }
 
   /** Upsert a single company record */
@@ -201,6 +215,19 @@ export class CompaniesStore {
     this.db.prepare("DELETE FROM watchlist WHERE source = 'auto'").run();
   }
 
+  /**
+   * Returns a function that inserts a minimal placeholder company row.
+   * Used when seeding the watchlist with companies whose IDs don't exist
+   * in the companies table (seeds use synthetic negative IDs).
+   * Uses INSERT OR IGNORE so existing rows are never overwritten.
+   */
+  prepareCompanyPlaceholder(): (id: number, name: string) => void {
+    const stmt = this.db.prepare(
+      'INSERT OR IGNORE INTO companies (id, name) VALUES (?, ?)'
+    );
+    return (id: number, name: string) => stmt.run(id, name);
+  }
+
   /** Close the database connection */
   close(): void {
     this.db.close();
@@ -287,6 +314,26 @@ export class SeenJobsStore {
    */
   clearUnscored(): number {
     const result = this.db.prepare('DELETE FROM seen_jobs WHERE score IS NULL').run();
+    return result.changes;
+  }
+
+  /**
+   * Expire seen_jobs entries older than `daysOld` days.
+   * This prevents permanent dedup starvation when a company keeps the same
+   * job posting up for weeks — after TTL expires, the job becomes re-eligible
+   * and will be re-scored + notified only if it scores >= threshold again.
+   *
+   * Only expires jobs that were NOT notified (score < threshold), OR that were
+   * seen more than daysOld days ago. High-scoring notified jobs are expired too
+   * after the TTL to avoid double-notifications becoming permanent blocks.
+   *
+   * @returns number of expired rows
+   */
+  expireOldSeenJobs(daysOld: number): number {
+    const result = this.db.prepare(`
+      DELETE FROM seen_jobs
+      WHERE first_seen_at < datetime('now', '-' || ? || ' days')
+    `).run(daysOld);
     return result.changes;
   }
 

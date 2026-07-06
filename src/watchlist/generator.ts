@@ -11,6 +11,7 @@ import {
   CONFIG,
 } from '../config/constants.js';
 import { getCollector } from '../sources/ats/base.js';
+import { getSeedWatchlistEntries } from './seeds.js';
 
 /**
  * Row shape from companies.parquet after DuckDB filtering.
@@ -95,11 +96,12 @@ export async function generateWatchlist(
       -- Must use a supported ATS
       LOWER(COALESCE(ats, '')) IN (${atsFilter})
 
-      -- Industry filter: must match OR be null (many good companies have null industry)
-      AND (
-        LOWER(COALESCE(industry, '')) SIMILAR TO '%(${industryPattern})%'
-        OR industry IS NULL
-      )
+      -- Industry filter: must be a tech/software industry.
+      -- NOTE: We intentionally do NOT include "OR industry IS NULL" here because
+      -- that loophole would let every vet hospital, logistics company, and locksmith
+      -- through (most companies in parquet have null industry). The seed list in
+      -- seeds.ts compensates for real tech companies that have null industry data.
+      AND LOWER(COALESCE(industry, 'none')) SIMILAR TO '%(${industryPattern})%'
 
       -- Country filter: must match OR be null (remote-first companies)
       AND (
@@ -156,11 +158,29 @@ export async function generateWatchlist(
 
   store.addManyToWatchlist(entries);
 
-  const finalSize = store.getWatchlistSize();
-  console.log(`  ✓ Watchlist generated: ${finalSize} companies`);
+  const parquetSize = store.getWatchlistSize();
+  console.log(`  ✓ Parquet watchlist: ${parquetSize} companies`);
   if (slugFailures > 0) {
     console.log(`  ⚠ Skipped ${slugFailures} companies (couldn't extract slug from career URL)`);
   }
+
+  // ── Step 4: Merge curated seed list ──────────────────────
+  // Seeds use INSERT OR IGNORE, so any slug already added from parquet is skipped.
+  console.log('  🌱 Merging curated tech company seeds...');
+  const seedEntries = getSeedWatchlistEntries();
+
+  // Seeds may reference a negative company_id not in the companies table.
+  // We need to insert placeholder company rows first to satisfy the FK constraint.
+  const companyStmt = store.prepareCompanyPlaceholder();
+  for (const seed of seedEntries) {
+    companyStmt(seed.companyId, seed.companyName);
+  }
+  store.addManyToWatchlist(seedEntries);
+
+  const finalSize = store.getWatchlistSize();
+  const seedsAdded = finalSize - parquetSize;
+  console.log(`  ✓ Seeds added: ${seedsAdded} (${seedEntries.length} attempted, duplicates skipped)`);
+  console.log(`  ✓ Final watchlist: ${finalSize} companies`);
 
   // Print breakdown by ATS
   for (const ats of SUPPORTED_ATS) {

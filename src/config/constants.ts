@@ -7,13 +7,11 @@
  * Covers: software roles + entry-level indicators.
  */
 export const TITLE_INCLUDE_KEYWORDS = [
-  // Role types
+  // Core SWE role types
   'software', 'engineer', 'developer', 'backend', 'frontend',
   'full stack', 'fullstack', 'full-stack',
-  'sde', 'swe', 'devops', 'platform', 'cloud',
-  'data', 'ai', 'ml', 'qa', 'sre', 'web',
-  'application', 'systems', 'infrastructure',
-  // Entry-level indicators
+  'sde', 'swe', 'devops', 'web', 'api',
+  // Entry-level indicators (these alone are enough to qualify)
   'intern', 'internship', 'graduate', 'entry',
   'fresher', 'trainee', 'associate', 'apprentice',
   'new grad', 'early career', 'campus', 'junior',
@@ -80,6 +78,14 @@ export const WATCHLIST_COUNTRIES = [
   'netherlands', 'ireland', 'israel', 'sweden',
   'france', 'japan',
 ] as const;
+
+/**
+ * Number of days after which a "seen" job re-becomes eligible for scoring.
+ * Prevents permanent dedup starvation when companies keep jobs posted for weeks.
+ * After this TTL, the job will be re-scored and re-notified only if it scores
+ * above the threshold again.
+ */
+export const DEDUP_TTL_DAYS = 7;
 
 /**
  * Environment-driven configuration with sensible defaults.
